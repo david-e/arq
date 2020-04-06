@@ -162,14 +162,14 @@ class ArqRedis(Redis):
         jd.score = score
         return jd
 
-    async def get_job(self, job_id) -> JobDef:
-        keys = await self.keys('*' + job_id)
-        for partial, k in enumerate((f'{result_key_prefix}{job_id}', f'{partial_result_key_prefix}{job_id}')):
-            if k in keys:
-                return await self._get_job_result(k, partial)
-        if keys:
-            return await self._get_job_def(job_id)
-        raise ValueError(f'missing job_id: {job_id}')
+    async def get_job(self, job_id: str, queue_name: str = default_queue_name) -> Job:
+        """
+        Get Job handle from job_id
+        """
+        job_exists = await self.keys(f'*:{job_id}')
+        if not job_exists:
+            raise ValueError(f'{job_id} not found')
+        return Job(job_id=job_id, redis=self, _queue_name=queue_name, _deserializer=self.job_deserializer)
 
     async def queued_jobs(self, *, queue_name: str = default_queue_name) -> List[JobDef]:
         """
@@ -179,6 +179,9 @@ class ArqRedis(Redis):
         return await asyncio.gather(*[self._get_job_def(job_id, score) for job_id, score in jobs])
 
     async def all_jobs_queued(self, *, queue_name: str = default_queue_name) -> List[JobDef]:
+        """
+        Get information about queued jobs, same of queued_jobs, but adopting naming convention.
+        """
         return await self.queued_jobs(queue_name=queue_name)
 
     async def all_jobs_running(self) -> List[JobDef]:
@@ -187,7 +190,7 @@ class ArqRedis(Redis):
         """
         keys = await self.keys(in_progress_key_prefix + '*')
         lkey = len(in_progress_key_prefix)
-        results = await asyncio.gather(*[self.get_job(k[lkey:]) for k in keys])
+        results = await asyncio.gather(*[self._get_job_def(k[lkey:]) for k in keys])
         return sorted(results, key=attrgetter('enqueue_time'))
 
 
