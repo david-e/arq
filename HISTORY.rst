@@ -3,6 +3,12 @@
 History
 -------
 
+v0.18.5 (2020-04-06)
+....................
+* Added ``job.abort`` to abort the running job
+* Added ``worker.save_partial_result`` to job context and ``arq_redis.get_job`` , to be able to save and retrieve partial results.
+* Added ``all_jobs_running`` to show running jobs, and ``all_jobs_queued`` to keep the naming convention
+
 v0.18.4 (2019-12-19)
 ....................
 * Add ``py.typed`` file to tell mypy the package has type hints, #163

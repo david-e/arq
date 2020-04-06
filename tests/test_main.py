@@ -167,14 +167,15 @@ async def test_cant_pickle_result(arq_redis: ArqRedis, worker):
 
 
 async def test_get_jobs(arq_redis: ArqRedis):
-    await arq_redis.enqueue_job('foobar', a=1, b=2, c=3)
+    j0 = await arq_redis.enqueue_job('foobar', a=1, b=2, c=3)
     await asyncio.sleep(0.01)
-    await arq_redis.enqueue_job('second', 4, b=5, c=6)
+    j1 = await arq_redis.enqueue_job('second', 4, b=5, c=6)
     await asyncio.sleep(0.01)
-    await arq_redis.enqueue_job('third', 7, b=8)
+    j2 = await arq_redis.enqueue_job('third', 7, b=8)
     jobs = await arq_redis.queued_jobs()
     assert [dataclasses.asdict(j) for j in jobs] == [
         {
+            'job_id': j0.job_id,
             'function': 'foobar',
             'args': (),
             'kwargs': {'a': 1, 'b': 2, 'c': 3},
@@ -183,6 +184,7 @@ async def test_get_jobs(arq_redis: ArqRedis):
             'score': AnyInt(),
         },
         {
+            'job_id': j1.job_id,
             'function': 'second',
             'args': (4,),
             'kwargs': {'b': 5, 'c': 6},
@@ -191,6 +193,7 @@ async def test_get_jobs(arq_redis: ArqRedis):
             'score': AnyInt(),
         },
         {
+            'job_id': j2.job_id,
             'function': 'third',
             'args': (7,),
             'kwargs': {'b': 8},

@@ -29,6 +29,7 @@ async def main():
         function='the_task',
         args=(),
         kwargs={},
+        job_id='',
         job_try=None,
         enqueue_time=datetime.datetime(2019, 4, 23, 13, 58, 56, 781000),
         score=1556027936781

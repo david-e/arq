@@ -44,6 +44,7 @@ async def test_enqueue_job(arq_redis: ArqRedis, worker, queue_name=default_queue
     assert JobStatus.complete == await j.status()
     info = await j.info()
     assert info == JobResult(
+        job_id=j.job_id,
         job_try=1,
         function='foobar',
         args=(1, 2),
@@ -55,9 +56,10 @@ async def test_enqueue_job(arq_redis: ArqRedis, worker, queue_name=default_queue
         finish_time=CloseToNow(),
         score=None,
     )
-    results = await arq_redis.all_job_results()
+    results = await arq_redis.all_jobs_results()
     assert results == [
         JobResult(
+            job_id=j.job_id,
             function='foobar',
             args=(1, 2),
             kwargs={'c': 3},
@@ -68,7 +70,6 @@ async def test_enqueue_job(arq_redis: ArqRedis, worker, queue_name=default_queue
             start_time=CloseToNow(),
             finish_time=CloseToNow(),
             score=None,
-            job_id=j.job_id,
         )
     ]
 
@@ -82,9 +83,9 @@ async def test_cant_unpickle_at_all():
         def __getstate__(self):
             raise TypeError("this doesn't pickle")
 
-    r1 = serialize_result('foobar', (1,), {}, 1, 123, True, Foobar(), 123, 123, 'testing')
+    r1 = serialize_result('j0', 'foobar', (1,), {}, 1, 123, True, Foobar(), 123, 123, 'testing')
     assert isinstance(r1, bytes)
-    r2 = serialize_result('foobar', (Foobar(),), {}, 1, 123, True, Foobar(), 123, 123, 'testing')
+    r2 = serialize_result('j1', 'foobar', (Foobar(),), {}, 1, 123, True, Foobar(), 123, 123, 'testing')
     assert r2 is None
 
 
@@ -96,10 +97,12 @@ async def test_custom_serializer():
     def custom_serializer(x):
         return b'0123456789'
 
-    r1 = serialize_result('foobar', (1,), {}, 1, 123, True, Foobar(), 123, 123, 'testing', serializer=custom_serializer)
+    r1 = serialize_result(
+        'j0', 'foobar', (1,), {}, 1, 123, True, Foobar(), 123, 123, 'testing', serializer=custom_serializer
+    )
     assert r1 == b'0123456789'
     r2 = serialize_result(
-        'foobar', (Foobar(),), {}, 1, 123, True, Foobar(), 123, 123, 'testing', serializer=custom_serializer
+        'j1', 'foobar', (Foobar(),), {}, 1, 123, True, Foobar(), 123, 123, 'testing', serializer=custom_serializer
     )
     assert r2 == b'0123456789'
 
@@ -131,6 +134,6 @@ async def test_deserialize_info(arq_redis: ArqRedis):
 
 
 async def test_deserialize_job_raw():
-    assert deserialize_job_raw(pickle.dumps({'f': 1, 'a': 2, 'k': 3, 't': 4, 'et': 5})) == (1, 2, 3, 4, 5)
+    assert deserialize_job_raw(pickle.dumps({'j': 0, 'f': 1, 'a': 2, 'k': 3, 't': 4, 'et': 5})) == (0, 1, 2, 3, 4, 5)
     with pytest.raises(DeserializationError, match='unable to deserialize job'):
         deserialize_job_raw(b'123')

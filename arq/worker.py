@@ -23,6 +23,7 @@ from .constants import (
     health_check_key_suffix,
     in_progress_key_prefix,
     job_key_prefix,
+    partial_result_key_prefix,
     result_key_prefix,
     retry_key_prefix,
 )
@@ -208,9 +209,10 @@ class Worker:
         self.main_task = None
         self.loop = asyncio.get_event_loop()
         self.ctx = ctx or {}
-        max_timeout = max(f.timeout_s or self.job_timeout_s for f in self.functions.values())
-        self.in_progress_timeout_s = max_timeout + 10
+        # max_timeout = max(f.timeout_s or self.job_timeout_s for f in self.functions.values())
+        self.in_progress_timeout_s = self.poll_delay_s * 2 + 1
         self.jobs_complete = 0
+        self.jobs_running = 0
         self.jobs_retried = 0
         self.jobs_failed = 0
         self._last_health_check = 0
@@ -259,7 +261,7 @@ class Worker:
             self.max_burst_jobs = max_burst_jobs
         await self.async_run()
         if self.jobs_failed:
-            failed_job_results = [r for r in await self.pool.all_job_results() if not r.success]
+            failed_job_results = [r for r in await self.pool.all_jobs_results() if not r.success]
             raise FailedJobs(self.jobs_failed, failed_job_results)
         else:
             return self.jobs_complete
@@ -372,6 +374,7 @@ class Worker:
         async def job_failed(exc: Exception):
             self.jobs_failed += 1
             result_data_ = serialize_result(
+                job_id=job_id,
                 function=function_name,
                 args=args,
                 kwargs=kwargs,
@@ -391,7 +394,7 @@ class Worker:
             return await job_failed(JobExecutionFailed('job expired'))
 
         try:
-            function_name, args, kwargs, enqueue_job_try, enqueue_time_ms = deserialize_job_raw(
+            job_id, function_name, args, kwargs, enqueue_job_try, enqueue_time_ms = deserialize_job_raw(
                 v, deserializer=self.job_deserializer
             )
         except SerializationError as e:
@@ -420,6 +423,7 @@ class Worker:
             logger.warning('%6.2fs ! %s max retries %d exceeded', t, ref, max_tries)
             self.jobs_failed += 1
             result_data = serialize_result(
+                job_id,
                 function_name,
                 args,
                 kwargs,
@@ -434,16 +438,35 @@ class Worker:
             )
             return await asyncio.shield(self.abort_job(job_id, result_data))
 
+        timeout_s = self.job_timeout_s if function.timeout_s is None else function.timeout_s
+
+        async def serialize_partial_result(result):
+            result_data = serialize_result(
+                job_id,
+                function_name,
+                args,
+                kwargs,
+                job_try,
+                enqueue_time_ms,
+                None,
+                result,
+                start_ms,
+                timestamp_ms(),
+                ref,
+                serializer=self.job_serializer,
+            )
+            await self.pool.set(partial_result_key_prefix + job_id, result_data, expire=timeout_s)
+
         result = no_result
         exc_extra = None
         finish = False
-        timeout_s = self.job_timeout_s if function.timeout_s is None else function.timeout_s
         incr_score = None
         job_ctx = {
             'job_id': job_id,
             'job_try': job_try,
             'enqueue_time': ms_to_datetime(enqueue_time_ms),
             'score': score,
+            'save_partial_result': serialize_partial_result,
         }
         ctx = {**self.ctx, **job_ctx}
         start_ms = timestamp_ms()
@@ -457,6 +480,7 @@ class Worker:
             # run repr(result) and extra inside try/except as they can raise exceptions
             try:
                 async with async_timeout.timeout(timeout_s or None):
+                    self.jobs_running += 1
                     result = await function.coroutine(ctx, *args, **kwargs)
             except Exception as e:
                 exc_extra = getattr(e, 'extra', None)
@@ -465,6 +489,8 @@ class Worker:
                 raise
             else:
                 result_str = '' if result is None else truncate(repr(result))
+            finally:
+                self.jobs_running -= 1
         except Exception as e:
             finished_ms = timestamp_ms()
             t = (finished_ms - start_ms) / 1000
@@ -502,6 +528,7 @@ class Worker:
         result_data = None
         if result is not no_result and result_timeout_s > 0:
             result_data = serialize_result(
+                job_id,
                 function_name,
                 args,
                 kwargs,
@@ -523,7 +550,7 @@ class Worker:
         with await self.pool as conn:
             await conn.unwatch()
             tr = conn.multi_exec()
-            delete_keys = [in_progress_key_prefix + job_id]
+            delete_keys = [in_progress_key_prefix + job_id, partial_result_key_prefix + job_id]
             if finish:
                 if result_data:
                     tr.setex(result_key_prefix + job_id, result_timeout_s, result_data)
@@ -553,6 +580,15 @@ class Worker:
     async def heart_beat(self):
         await self.record_health()
         await self.run_cron()
+        await self.refresh_in_progress()
+
+    async def refresh_in_progress(self, refresh_time=None):
+        refresh_time = refresh_time or self.in_progress_timeout_s
+        with await self.pool as conn:
+            tr = conn.multi_exec()
+            for job_id in self.tasks.keys():
+                tr.setex(in_progress_key_prefix + job_id, refresh_time, b'1')
+            await tr.execute()
 
     async def run_cron(self):
         n = datetime.now()
@@ -581,7 +617,7 @@ class Worker:
         queued = await self.pool.zcard(self.queue_name)
         info = (
             f'{datetime.now():%b-%d %H:%M:%S} j_complete={self.jobs_complete} j_failed={self.jobs_failed} '
-            f'j_retried={self.jobs_retried} j_ongoing={pending_tasks} queued={queued}'
+            f'j_retried={self.jobs_retried} j_ongoing={pending_tasks} queued={queued} running={self.jobs_running}'
         )
         await self.pool.setex(self.health_check_key, self.health_check_interval + 1, info.encode())
         log_suffix = info[info.index('j_complete=') :]

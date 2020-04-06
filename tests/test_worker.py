@@ -683,5 +683,54 @@ async def test_abort_job(arq_redis: ArqRedis, worker, caplog, loop):
     assert worker.jobs_complete == 0
     assert worker.jobs_failed == 1
     assert worker.jobs_retried == 0
+    keys = await arq_redis.keys(f'{abort_key_prefix}*')
+    assert len(keys) == 1
+    await worker._poll_iteration()
+    keys = await arq_redis.keys(f'{abort_key_prefix}*')
+    assert len(keys) == 0
+    log = re.sub(r'\d+.\d\ds', 'X.XXs', '\n'.join(r.message for r in caplog.records))
+    assert 'X.XXs → testing:longfunc()\n  X.XXs 🛇  testing:longfunc aborted' in log
+
+
+async def test_in_progress_job(arq_redis: ArqRedis, worker, caplog, loop):
+    async def longfunc(ctx):
+        for i in range(360000):
+            await ctx['save_partial_result']({'i': i})
+            await asyncio.sleep(0.01)
+
+    async def wait_and_abort(job, delay=0.2):
+        await asyncio.sleep(delay)
+        await job.abort()
+
+    caplog.set_level(logging.INFO)
+    job = await arq_redis.enqueue_job('longfunc', _job_id='testing')
+
+    worker: Worker = worker(functions=[func(longfunc, name='longfunc')], abort_jobs=True, poll_delay=0.1)
+    assert worker.jobs_complete == 0
+    assert worker.jobs_failed == 0
+    assert worker.jobs_retried == 0
+    _job = await arq_redis.get_job(job_id='testing')
+    queued = await arq_redis.all_jobs_queued()
+    assert len(queued) == 1
+    tsk = asyncio.create_task(worker.main())
+    await asyncio.sleep(0.05)
+    assert worker.jobs_running == 1
+    running_jobs = await arq_redis.all_jobs_running()
+    assert len(running_jobs) == 1
+    # result raise a TimeoutException
+    with pytest.raises(asyncio.TimeoutError):
+        await job.result(timeout=0.1)
+    # partial result is available
+    res = await job.result(partial=True)
+    assert res['i'] > 0
+    await asyncio.gather(wait_and_abort(job), tsk)
+    await asyncio.sleep(0.05)
+    assert worker.jobs_complete == 0
+    assert worker.jobs_failed == 1
+    assert worker.jobs_retried == 0
+    _job = await arq_redis.get_job(job_id='testing')
+    assert _job.job_id == 'testing'
+    with pytest.raises(ValueError):
+        await arq_redis.get_job('invalid_job_id')
     log = re.sub(r'\d+.\d\ds', 'X.XXs', '\n'.join(r.message for r in caplog.records))
     assert 'X.XXs → testing:longfunc()\n  X.XXs 🛇  testing:longfunc aborted' in log

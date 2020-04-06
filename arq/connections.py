@@ -11,7 +11,13 @@ from uuid import uuid4
 import aioredis
 from aioredis import MultiExecError, Redis
 
-from .constants import default_queue_name, job_key_prefix, result_key_prefix
+from .constants import (
+    default_queue_name,
+    in_progress_key_prefix,
+    job_key_prefix,
+    partial_result_key_prefix,
+    result_key_prefix,
+)
 from .jobs import Deserializer, Job, JobDef, JobResult, Serializer, deserialize_job, serialize_job
 from .utils import timestamp_ms, to_ms, to_unix_ms
 
@@ -120,7 +126,9 @@ class ArqRedis(Redis):
 
             expires_ms = expires_ms or score - enqueue_time_ms + expires_extra_ms
 
-            job = serialize_job(function, args, kwargs, _job_try, enqueue_time_ms, serializer=self.job_serializer)
+            job = serialize_job(
+                job_id, function, args, kwargs, _job_try, enqueue_time_ms, serializer=self.job_serializer
+            )
             tr = conn.multi_exec()
             tr.psetex(job_key, expires_ms, job)
             tr.zadd(_queue_name, score, job_id)
@@ -133,14 +141,14 @@ class ArqRedis(Redis):
                 return
         return Job(job_id, redis=self, _queue_name=_queue_name, _deserializer=self.job_deserializer)
 
-    async def _get_job_result(self, key) -> JobResult:
-        job_id = key[len(result_key_prefix) :]
+    async def _get_job_result(self, key, partial: bool = False) -> JobResult:
+        job_id = key[len(result_key_prefix if not partial else partial_result_key_prefix) :]
         job = Job(job_id, self, _deserializer=self.job_deserializer)
-        r = await job.result_info()
+        r = await job.result_info(partial)
         r.job_id = job_id
         return r
 
-    async def all_job_results(self) -> List[JobResult]:
+    async def all_jobs_results(self) -> List[JobResult]:
         """
         Get results for all jobs in redis.
         """
@@ -148,11 +156,20 @@ class ArqRedis(Redis):
         results = await asyncio.gather(*[self._get_job_result(k) for k in keys])
         return sorted(results, key=attrgetter('enqueue_time'))
 
-    async def _get_job_def(self, job_id, score) -> JobDef:
+    async def _get_job_def(self, job_id, score=None) -> JobDef:
         v = await self.get(job_key_prefix + job_id, encoding=None)
         jd = deserialize_job(v, deserializer=self.job_deserializer)
         jd.score = score
         return jd
+
+    async def get_job(self, job_id) -> JobDef:
+        keys = await self.keys('*' + job_id)
+        for partial, k in enumerate((f'{result_key_prefix}{job_id}', f'{partial_result_key_prefix}{job_id}')):
+            if k in keys:
+                return await self._get_job_result(k, partial)
+        if keys:
+            return await self._get_job_def(job_id)
+        raise ValueError(f'missing job_id: {job_id}')
 
     async def queued_jobs(self, *, queue_name: str = default_queue_name) -> List[JobDef]:
         """
@@ -160,6 +177,18 @@ class ArqRedis(Redis):
         """
         jobs = await self.zrange(queue_name, withscores=True)
         return await asyncio.gather(*[self._get_job_def(job_id, score) for job_id, score in jobs])
+
+    async def all_jobs_queued(self, *, queue_name: str = default_queue_name) -> List[JobDef]:
+        return await self.queued_jobs(queue_name=queue_name)
+
+    async def all_jobs_running(self) -> List[JobDef]:
+        """
+        Get information about running jobs
+        """
+        keys = await self.keys(in_progress_key_prefix + '*')
+        lkey = len(in_progress_key_prefix)
+        results = await asyncio.gather(*[self.get_job(k[lkey:]) for k in keys])
+        return sorted(results, key=attrgetter('enqueue_time'))
 
 
 async def create_pool(
