@@ -465,6 +465,13 @@ async def test_repeat_job_result(arq_redis: ArqRedis, worker):
 
     assert await arq_redis.enqueue_job('foobar', _job_id='job_id') is None
 
+    j2 = await arq_redis.enqueue_job('foobar', _job_id='job_id', _del_prev_result=True)
+    assert isinstance(j2, Job)
+    assert await j2.status() == JobStatus.queued
+
+    await worker(functions=[foobar]).run_check()
+    assert await j2.status() == JobStatus.complete
+
 
 async def test_queue_read_limit_equals_max_jobs(arq_redis: ArqRedis, worker):
     for _ in range(4):
@@ -684,10 +691,10 @@ async def test_abort_job(arq_redis: ArqRedis, worker, caplog, loop):
     assert worker.jobs_failed == 1
     assert worker.jobs_retried == 0
     keys = await arq_redis.keys(f'{abort_key_prefix}*')
-    assert len(keys) == 1
-    await worker._poll_iteration()
-    keys = await arq_redis.keys(f'{abort_key_prefix}*')
     assert len(keys) == 0
+    # await worker._poll_iteration()
+    # keys = await arq_redis.keys(f'{abort_key_prefix}*')
+    # assert len(keys) == 0
     log = re.sub(r'\d+.\d\ds', 'X.XXs', '\n'.join(r.message for r in caplog.records))
     assert 'X.XXs → testing:longfunc()\n  X.XXs 🛇  testing:longfunc aborted' in log
 

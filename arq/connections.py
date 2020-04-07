@@ -83,6 +83,7 @@ class ArqRedis(Redis):
         _defer_by: Union[None, int, float, timedelta] = None,
         _expires: Union[None, int, float, timedelta] = None,
         _job_try: Optional[int] = None,
+        _del_prev_result: bool = False,
         **kwargs: Any,
     ) -> Optional[Job]:
         """
@@ -107,6 +108,8 @@ class ArqRedis(Redis):
         expires_ms = to_ms(_expires)
 
         with await self as conn:
+            if _del_prev_result:
+                await conn.delete(result_key_prefix + job_id)
             pipe = conn.pipeline()
             pipe.unwatch()
             pipe.watch(job_key)

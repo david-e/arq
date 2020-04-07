@@ -455,7 +455,9 @@ class Worker:
                 ref,
                 serializer=self.job_serializer,
             )
-            await self.pool.set(partial_result_key_prefix + job_id, result_data, expire=timeout_s)
+            return await asyncio.shield(
+                self.pool.set(partial_result_key_prefix + job_id, result_data, expire=timeout_s)
+            )
 
         result = no_result
         exc_extra = None
@@ -507,6 +509,7 @@ class Worker:
                 finish = True
                 self._aborting_tasks.remove(job_id)
                 self.jobs_failed += 1
+                del self.tasks[job_id]
             elif was_cancelled and self.retry_jobs:
                 logger.info('%6.2fs ↻ %s cancelled, will be run again', t, ref)
                 self.jobs_retried += 1
