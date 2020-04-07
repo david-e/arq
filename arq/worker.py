@@ -11,10 +11,10 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 import async_timeout
 from aioredis import MultiExecError
-from pydantic.utils import import_string
 
 from arq.cron import CronJob
 from arq.jobs import Deserializer, SerializationError, Serializer, deserialize_job_raw, serialize_result
+from pydantic.utils import import_string
 
 from .connections import ArqRedis, RedisSettings, create_pool, log_redis_info
 from .constants import (
@@ -317,11 +317,11 @@ class Worker:
             job_ids = await self.pool.zrangebyscore(
                 self.queue_name, offset=self._queue_read_offset, count=count, max=now
             )
-        
+
         abort = set()
         if self.abort_jobs:
             abort = await self._scan_abort_jobs()
-        
+
         await self.run_jobs([job_id for job_id in job_ids if job_id not in abort])
 
         for job_id, t in list(self.tasks.items()):
@@ -342,8 +342,7 @@ class Worker:
             with await self.pool as conn:
                 if job_id in self._refresh_jobs_timeout:
                     await asyncio.gather(
-                        conn.unwatch(),
-                        conn.setex(in_progress_key, self.in_progress_timeout_s, b'1'),
+                        conn.unwatch(), conn.setex(in_progress_key, self.in_progress_timeout_s, b'1'),
                     )
                     self.sem.release()
                     continue
@@ -520,7 +519,7 @@ class Worker:
             elif was_cancelled and job_id in self._aborting_tasks:
                 logger.info('%6.2fs 🛇  %s aborted', t, ref)
                 result = e
-                finish = True  
+                finish = True
                 self.jobs_failed += 1
                 # del self.tasks[job_id]
             elif was_cancelled and self.retry_jobs:

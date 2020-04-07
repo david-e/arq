@@ -731,7 +731,7 @@ async def test_in_progress_job(arq_redis: ArqRedis, worker, caplog, loop):
     res = await job.result(partial=True)
     assert res['i'] > 0
     aborted, _ = await asyncio.gather(wait_and_abort(job), tsk)
-    assert aborted == True
+    assert aborted is True
     assert worker.jobs_complete == 0
     assert worker.jobs_failed == 1
     assert worker.jobs_retried == 0
