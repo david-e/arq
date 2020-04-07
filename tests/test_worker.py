@@ -700,14 +700,14 @@ async def test_abort_job(arq_redis: ArqRedis, worker, caplog, loop):
 
 
 async def test_in_progress_job(arq_redis: ArqRedis, worker, caplog, loop):
-    async def longfunc(ctx):
+    async def longfunc(ctx, sleep=0.05):
         for i in range(360000):
             await ctx['save_partial_result']({'i': i})
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(sleep)
 
-    async def wait_and_abort(job, delay=0.2):
+    async def wait_and_abort(job, delay=0.1):
         await asyncio.sleep(delay)
-        await job.abort()
+        return await job.abort()
 
     caplog.set_level(logging.INFO)
     job = await arq_redis.enqueue_job('longfunc', _job_id='testing')
@@ -730,8 +730,8 @@ async def test_in_progress_job(arq_redis: ArqRedis, worker, caplog, loop):
     # partial result is available
     res = await job.result(partial=True)
     assert res['i'] > 0
-    await asyncio.gather(wait_and_abort(job), tsk)
-    await asyncio.sleep(0.05)
+    aborted, _ = await asyncio.gather(wait_and_abort(job), tsk)
+    assert aborted == True
     assert worker.jobs_complete == 0
     assert worker.jobs_failed == 1
     assert worker.jobs_retried == 0

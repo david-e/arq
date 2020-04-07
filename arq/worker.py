@@ -210,7 +210,7 @@ class Worker:
         self.loop = asyncio.get_event_loop()
         self.ctx = ctx or {}
         # max_timeout = max(f.timeout_s or self.job_timeout_s for f in self.functions.values())
-        self.in_progress_timeout_s = self.poll_delay_s * 2 + 1
+        self.in_progress_timeout_s = self.poll_delay_s * 3 + 5
         self.jobs_complete = 0
         self.jobs_running = 0
         self.jobs_retried = 0
@@ -223,6 +223,7 @@ class Worker:
         # whether or not to retry jobs on Retry and CancelledError
         self.retry_jobs = retry_jobs
         self.abort_jobs = abort_jobs
+        self._refresh_jobs_timeout = set()
         self._aborting_tasks = set()
         self.max_burst_jobs = max_burst_jobs
         self.job_serializer = job_serializer
@@ -289,7 +290,7 @@ class Worker:
                     return
 
     async def _scan_abort_jobs(self):
-        todel, cur = [], b'0'
+        todel, cur, abort = [], b'0', set()
         lk, mk = len(abort_key_prefix), f'{abort_key_prefix}*'
         while cur:
             cur, keys = await self.pool.scan(cur, match=mk)
@@ -298,9 +299,10 @@ class Worker:
                 if job_id not in self.tasks:
                     todel.append(job_key)
                     continue
-                self._aborting_tasks.add(job_id)
+                abort.add(job_id)
         if todel:
             await self.pool.delete(*todel)
+        return abort
 
     async def _poll_iteration(self):
         count = self.queue_read_limit
@@ -315,18 +317,20 @@ class Worker:
             job_ids = await self.pool.zrangebyscore(
                 self.queue_name, offset=self._queue_read_offset, count=count, max=now
             )
-
-        await self.run_jobs(job_ids)
-
+        
+        abort = set()
         if self.abort_jobs:
-            await self._scan_abort_jobs()
+            abort = await self._scan_abort_jobs()
+        
+        await self.run_jobs([job_id for job_id in job_ids if job_id not in abort])
 
         for job_id, t in list(self.tasks.items()):
             if t.done():
                 del self.tasks[job_id]
                 # required to make sure errors in run_job get propagated
                 t.result()
-            elif job_id in self._aborting_tasks:
+            elif job_id in abort and job_id not in self._aborting_tasks:
+                self._aborting_tasks.add(job_id)
                 t.cancel()
 
         await self.heart_beat()
@@ -336,6 +340,13 @@ class Worker:
             await self.sem.acquire()
             in_progress_key = in_progress_key_prefix + job_id
             with await self.pool as conn:
+                if job_id in self._refresh_jobs_timeout:
+                    await asyncio.gather(
+                        conn.unwatch(),
+                        conn.setex(in_progress_key, self.in_progress_timeout_s, b'1'),
+                    )
+                    self.sem.release()
+                    continue
                 _, _, ongoing_exists, score = await asyncio.gather(
                     conn.unwatch(),
                     conn.watch(in_progress_key),
@@ -361,6 +372,7 @@ class Worker:
                     t = self.loop.create_task(self.run_job(job_id, score))
                     t.add_done_callback(lambda _: self.sem.release())
                     self.tasks[job_id] = t
+                    self._refresh_jobs_timeout.add(job_id)
 
     async def run_job(self, job_id, score):  # noqa: C901
         start_ms = timestamp_ms()
@@ -493,6 +505,8 @@ class Worker:
                 result_str = '' if result is None else truncate(repr(result))
             finally:
                 self.jobs_running -= 1
+                if job_id in self._refresh_jobs_timeout:
+                    self._refresh_jobs_timeout.remove(job_id)
         except Exception as e:
             finished_ms = timestamp_ms()
             t = (finished_ms - start_ms) / 1000
@@ -506,10 +520,9 @@ class Worker:
             elif was_cancelled and job_id in self._aborting_tasks:
                 logger.info('%6.2fs 🛇  %s aborted', t, ref)
                 result = e
-                finish = True
-                self._aborting_tasks.remove(job_id)
+                finish = True  
                 self.jobs_failed += 1
-                del self.tasks[job_id]
+                # del self.tasks[job_id]
             elif was_cancelled and self.retry_jobs:
                 logger.info('%6.2fs ↻ %s cancelled, will be run again', t, ref)
                 self.jobs_retried += 1
@@ -561,8 +574,12 @@ class Worker:
                 tr.zrem(self.queue_name, job_id)
             elif incr_score:
                 tr.zincrby(self.queue_name, incr_score, job_id)
+            if job_id in self._aborting_tasks:
+                delete_keys.append(abort_key_prefix + job_id)
             tr.delete(*delete_keys)
             await tr.execute()
+            if job_id in self._aborting_tasks:
+                self._aborting_tasks.remove(job_id)
 
     async def abort_job(self, job_id: str, result_data: Optional[bytes]):
         with await self.pool as conn:
@@ -583,15 +600,15 @@ class Worker:
     async def heart_beat(self):
         await self.record_health()
         await self.run_cron()
-        await self.refresh_in_progress()
+        # await self.refresh_in_progress()
 
     async def refresh_in_progress(self, refresh_time=None):
         refresh_time = refresh_time or self.in_progress_timeout_s
         with await self.pool as conn:
             tr = conn.multi_exec()
-            for job_id in self.tasks.keys():
-                tr.setex(in_progress_key_prefix + job_id, refresh_time, b'1')
-            await tr.execute()
+            for job_id in self._refresh_jobs_timeout:
+                tr.expire(in_progress_key_prefix + job_id, refresh_time)
+                await tr.execute()
 
     async def run_cron(self):
         n = datetime.now()
