@@ -429,7 +429,7 @@ class Worker:
             await self.pool.setex(retry_key_prefix + job_id, 88400, str(job_try))
 
         max_tries = self.max_tries if function.max_tries is None else function.max_tries
-        if job_try > max_tries:
+        if max_tries > 0 and job_try > max_tries:
             t = (timestamp_ms() - enqueue_time_ms) / 1000
             logger.warning('%6.2fs ! %s max retries %d exceeded', t, ref, max_tries)
             self.jobs_failed += 1
