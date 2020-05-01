@@ -173,6 +173,7 @@ class Worker:
         ctx: Optional[Dict] = None,
         retry_jobs: bool = True,
         abort_jobs: bool = False,
+        disable_signal_handlers: bool = False,
         max_burst_jobs: int = -1,
         job_serializer: Optional[Serializer] = None,
         job_deserializer: Optional[Deserializer] = None,
@@ -217,8 +218,11 @@ class Worker:
         self.jobs_failed = 0
         self._last_health_check = 0
         self._last_health_check_log = None
-        self._add_signal_handler(signal.SIGINT, self.handle_sig)
-        self._add_signal_handler(signal.SIGTERM, self.handle_sig)
+
+        if not disable_signal_handlers:
+            self._add_signal_handler(signal.SIGINT, self.handle_sig)
+            self._add_signal_handler(signal.SIGTERM, self.handle_sig)
+
         self.on_stop = None
         # whether or not to retry jobs on Retry and CancelledError
         self.retry_jobs = retry_jobs
