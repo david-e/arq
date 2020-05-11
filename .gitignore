@@ -16,5 +16,5 @@ __pycache__/
 /.mypy_cache/
 /demo/tmp/
 .vscode/
-.venv/
+venv/
 /.auto-format
