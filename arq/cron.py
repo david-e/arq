@@ -4,8 +4,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable, Optional, Union
 
-from arq.utils import SecondsTimedelta, to_seconds
 from pydantic.utils import import_string
+
+from arq.utils import SecondsTimedelta, to_seconds
 
 
 class D(str, Enum):

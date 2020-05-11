@@ -11,10 +11,10 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 import async_timeout
 from aioredis import MultiExecError
+from pydantic.utils import import_string
 
 from arq.cron import CronJob
 from arq.jobs import Deserializer, SerializationError, Serializer, deserialize_job_raw, serialize_result
-from pydantic.utils import import_string
 
 from .connections import ArqRedis, RedisSettings, create_pool, log_redis_info
 from .constants import (
@@ -345,9 +345,7 @@ class Worker:
             in_progress_key = in_progress_key_prefix + job_id
             with await self.pool as conn:
                 if job_id in self._refresh_jobs_timeout:
-                    await asyncio.gather(
-                        conn.unwatch(), conn.setex(in_progress_key, self.in_progress_timeout_s, b'1'),
-                    )
+                    await asyncio.gather(conn.unwatch(), conn.setex(in_progress_key, self.in_progress_timeout_s, b'1'))
                     self.sem.release()
                     continue
                 _, _, ongoing_exists, score = await asyncio.gather(

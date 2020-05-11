@@ -156,11 +156,20 @@ class ArqRedis(Redis):
         Get results for all jobs in redis.
         """
         keys = await self.keys(result_key_prefix + '*')
-        results = await asyncio.gather(*[self._get_job_result(k) for k in keys])
-        return sorted(results, key=attrgetter('enqueue_time'))
+        jobs = []
+        for k in keys:
+            try:
+                job = await self._get_job_result(k)
+            except ValueError:
+                continue
+            jobs.append(job)
+        return jobs
+        return sorted(jobs, key=attrgetter('enqueue_time'))
 
     async def _get_job_def(self, job_id, score=None) -> JobDef:
         v = await self.get(job_key_prefix + job_id, encoding=None)
+        if not v:
+            raise ValueError
         jd = deserialize_job(v, deserializer=self.job_deserializer)
         jd.score = score
         return jd
@@ -178,8 +187,15 @@ class ArqRedis(Redis):
         """
         Get information about queued, mostly useful when testing.
         """
-        jobs = await self.zrange(queue_name, withscores=True)
-        return await asyncio.gather(*[self._get_job_def(job_id, score) for job_id, score in jobs])
+        jobs = []
+        jobs_keys = await self.zrange(queue_name, withscores=True)
+        for job_id, score in jobs_keys:
+            try:
+                job = await self._get_job_def(job_id, score)
+            except ValueError:
+                continue
+            jobs.append(job)
+        return jobs
 
     async def all_jobs_queued(self, *, queue_name: str = default_queue_name) -> List[JobDef]:
         """
@@ -193,8 +209,14 @@ class ArqRedis(Redis):
         """
         keys = await self.keys(in_progress_key_prefix + '*')
         lkey = len(in_progress_key_prefix)
-        results = await asyncio.gather(*[self._get_job_def(k[lkey:]) for k in keys])
-        return sorted(results, key=attrgetter('enqueue_time'))
+        jobs = []
+        for k in keys:
+            try:
+                job = await self._get_job_def(k[lkey:])
+            except ValueError:
+                continue
+            jobs.append(job)
+        return sorted(jobs, key=attrgetter('enqueue_time'))
 
 
 async def create_pool(
